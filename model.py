@@ -66,8 +66,8 @@ class SAP_RL_E(nn.Module):
     def forward(self, img_seq, proprio_seq):
         batch_size, window_len, _, H, W = img_seq.shape
 
-        all_img_features = 
-        all_attention_points = 
+        all_img_features = img_features
+        all_attention_points = attention_points
 
         img_seq_flat = img_seq.view(batch_size * window_len, 3, H, W)
 
@@ -100,3 +100,5 @@ class SAP_RL_E(nn.Module):
         pred_images = pred_images_flat.view(batch_size,window_len,3,H, W)
 
         return q_values, pred_images, pred_attention_points, attention_points
+    
+    
