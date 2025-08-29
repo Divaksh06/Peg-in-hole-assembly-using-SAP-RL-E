@@ -21,7 +21,7 @@ class SoftArgmax(nn.Module):
 
         y_coords, x_coords = torch.meshgrid(torch.arange(height), torch.arange(width))
         y_coords = y_coords.float().to(heatmaps.device)/(height-1)
-        y_coords = y_coords.float().to(heatmaps.device)/(width-1)
+        x_coords = x_coords.float().to(heatmaps.device)/(width-1)
 
         expected_x = torch.sum(softmax*x_coords, dim=(2,3))
         expected_y = torch.sum(softmax*y_coords, dim=(2,3))
@@ -40,16 +40,16 @@ class SAP_RL_E(nn.Module):
         )
 
         self.attention_encoder = nn.Sequential(
-            nn.Conv2d(3, 16, kernel_size=3, stride = 1, padding = 1), nn.Relu(),
-            nn.Conv2d(16, 16, kernel_size=3, stride = 1, padding = 1), nn.Relu(),
+            nn.Conv2d(3, 16, kernel_size=3, stride = 1, padding = 1), nn.ReLU(),
+            nn.Conv2d(16, 16, kernel_size=3, stride = 1, padding = 1), nn.ReLU(),
         )
 
-        self.attention_conv = nn.conv2d(16, num_attention_points, kernel_size = 1)
+        self.attention_conv = nn.Conv2d(16, num_attention_points, kernel_size = 1)
         self.soft_argmax = SoftArgmax()
 
         self.rl_policy = nn.Sequential(
             nn.Linear(23*6,256), nn.ReLU(),
-            nn.Linear(256,256), nn.ReLu()
+            nn.Linear(256,256), nn.ReLU()
         )
 
         self.action_head = nn.Linear(256, num_actions)
@@ -66,6 +66,9 @@ class SAP_RL_E(nn.Module):
     def forward(self, img_seq, proprio_seq):
         batch_size, window_len, _, H, W = img_seq.shape
 
+        img_features = img_features_flat.view(batch_size, window_len, 8, H, W)
+        attention_points = attention_points_flat.view(batch_size, window_len,self.num_attention_points*2)
+
         all_img_features = img_features
         all_attention_points = attention_points
 
@@ -75,11 +78,6 @@ class SAP_RL_E(nn.Module):
         attn_features_flat = self.attention_encoder(img_seq_flat)
         attn_heatmaps_flat = self.attention_conv(attn_features_flat)
         attention_points_flat = self.soft_argmax(attn_heatmaps_flat)
-
-        img_features = img_features_flat.view(batch_size, window_len, 8, H, W)
-        attention_points = attention_points_flat.view(batch_size, window_len,self.num_attention_points*2)
-
-        q_values = self.action_head(rl_hidden)
 
         policy_input = torch.cat([attention_points, proprio_seq], dim=-1)
         policy_input_flat = policy_input.view(batch_size, -1)

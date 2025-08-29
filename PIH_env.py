@@ -1,68 +1,91 @@
 import gymnasium as gym
-import pybullet as p
 from gymnasium import spaces
+import pybullet as p
 import pybullet_data
 import numpy as np
 import numericalunits
+
 
 class PIHenv(gym.Env):
     def __init__(self):
         super(PIHenv, self).__init__()
 
+        # Setup PyBullet search path and connect
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
-
         self.physics_client = p.connect(p.DIRECT)
 
-        p.loadURDF("plane.urdf")
-
+        # Load URDF files
+        self.plane_id = p.loadURDF("plane.urdf")
         self.robot_id = p.loadURDF("ur5.urdf", basePosition=[0, 0, 1], useFixedBase=True)
         self.hole_id = p.loadURDF("hole.urdf", basePosition=[0, 0, 0], useFixedBase=True)
 
-        self.action_space = spaces.Discrete(12)
-
-        obs_low = -np.ones(16) * np.inf
-        obs_high = np.ones(16) * np.inf
-        self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
-
+        # Determine revolute joint indices
         self.joint_indices = []
         self.num_joints = p.getNumJoints(self.robot_id)
         for i in range(self.num_joints):
             joint_info = p.getJointInfo(self.robot_id, i)
-            joint_name = joint_info[1].decode('utf-8')
-            joint_type = joint_info[2]
-            # Only revolute joints (type == 0)
+            joint_type = joint_info
             if joint_type == p.JOINT_REVOLUTE:
                 self.joint_indices.append(i)
 
+        # Action space: 2 directions for each joint
+        self.num_actionable_joints = len(self.joint_indices)
+        self.action_space = spaces.Discrete(self.num_actionable_joints * 2)  # action = joint_index*2 + direction
+
+        # Observation space: joint positions + ee_pos(3) + ee_orn(4) + relative_pos(3)
+        obs_dim = self.num_actionable_joints + 3 + 4 + 3
+        obs_low = -np.ones(obs_dim) * np.inf
+        obs_high = np.ones(obs_dim) * np.inf
+        self.observation_space = spaces.Box(low=obs_low, high=obs_high, dtype=np.float32)
+
+        # Find EE link index
         self.ee_link_index = None
         for i in range(self.num_joints):
-            link_name = p.getJointInfo(self.robot_id, i)[12].decode('utf-8')
+            link_name = p.getJointInfo(self.robot_id, i).decode('utf-8')
             if link_name in ("wrist_3_link", "ee_link"):
                 self.ee_link_index = i
                 break
+        assert self.ee_link_index is not None, "End-effector link not found!"
 
         self.joint_step_size = 0.05
-
-        self.dlim = 4.5 * numericalunits.mm
-
+        self.dlim = 4.5 * numericalunits.mm  # 0.0045 m
         self.step_count = 0
         self.max_steps = 200
 
         self.reset()
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         p.resetSimulation()
         p.setGravity(0, 0, -9.81)
-        p.loadURDF("plane.urdf")
+        self.plane_id = p.loadURDF("plane.urdf")
         self.robot_id = p.loadURDF("ur5.urdf", basePosition=[0, 0, 1], useFixedBase=True)
         self.hole_id = p.loadURDF("hole.urdf", basePosition=[0, 0, 0], useFixedBase=True)
         self.step_count = 0
+
+        # Update joint indices in case reloaded
+        self.joint_indices = []
+        self.num_joints = p.getNumJoints(self.robot_id)
+        for i in range(self.num_joints):
+            joint_info = p.getJointInfo(self.robot_id, i)
+            joint_type = joint_info
+            if joint_type == p.JOINT_REVOLUTE:
+                self.joint_indices.append(i)
+
+        # EE link index may need refresh after reload
+        self.ee_link_index = None
+        for i in range(self.num_joints):
+            link_name = p.getJointInfo(self.robot_id, i).decode('utf-8')
+            if link_name in ("wrist_3_link", "ee_link"):
+                self.ee_link_index = i
+                break
+        assert self.ee_link_index is not None, "End-effector link not found!"
 
         for j in self.joint_indices:
             p.resetJointState(self.robot_id, j, targetValue=0.0)
 
         observation = self._get_observation()
-        return observation
+        info = {}
+        return observation, info
 
     def step(self, action):
         self.step_count += 1
@@ -70,7 +93,10 @@ class PIHenv(gym.Env):
         joint_index = action // 2
         direction = 1 if (action % 2) == 0 else -1
 
-        current_pos = p.getJointState(self.robot_id, self.joint_indices[joint_index])[0]
+        # Safeguard: joint index in bounds
+        assert joint_index < len(self.joint_indices), "Action refers to invalid joint!"
+
+        current_pos = p.getJointState(self.robot_id, self.joint_indices[joint_index])
         new_pos = current_pos + direction * self.joint_step_size
 
         p.setJointMotorControl2(self.robot_id, self.joint_indices[joint_index],
@@ -79,19 +105,28 @@ class PIHenv(gym.Env):
         p.stepSimulation()
 
         observation = self._get_observation()
-        collision = len(p.getContactPoints(bodyA=self.robot_id)) > 0
-        reward = self._compute_reward(collision)
-        done = self._check_done(self.step_count, self.max_steps, collision)
-        info = {}
-        return observation, reward, done, info
+
+        # Only check EE_link contact
+        contact_points = p.getContactPoints(bodyA=self.robot_id, linkIndexA=self.ee_link_index)
+        collision = len(contact_points) > 0
+
+        # Compute reward
+        reward, inserted = self._compute_reward_and_inserted()
+
+        # Gymnasium API change: terminated (solved), truncated (timeout/bad event)
+        terminated = inserted
+        truncated = (self.step_count >= self.max_steps) or collision
+
+        info = {"collision": collision, "inserted": inserted}
+        return observation, reward, terminated, truncated, info
 
     def _get_observation(self):
-        joint_positions = [p.getJointState(self.robot_id, j)[0] for j in self.joint_indices]
+        joint_positions = [p.getJointState(self.robot_id, j) for j in self.joint_indices]
         joint_positions = np.array(joint_positions, dtype=np.float32)
 
         ee_state = p.getLinkState(self.robot_id, self.ee_link_index)
-        ee_pos = np.array(ee_state[4])
-        ee_orn = np.array(ee_state[5])
+        ee_pos = np.array(ee_state)
+        ee_orn = np.array(ee_state)
 
         hole_pos, _ = p.getBasePositionAndOrientation(self.hole_id)
         hole_pos = np.array(hole_pos)
@@ -101,49 +136,35 @@ class PIHenv(gym.Env):
         observation = np.concatenate([joint_positions, ee_pos, ee_orn, relative_pos])
         return observation.astype(np.float32)
 
-    def _compute_reward(self, collision):
+    def _compute_reward_and_inserted(self):
         ee_state = p.getLinkState(self.robot_id, self.ee_link_index)
-        ee_pos = np.array(ee_state[4])
+        ee_pos = np.array(ee_state)
         hole_pos, _ = p.getBasePositionAndOrientation(self.hole_id)
         hole_pos = np.array(hole_pos)
         dist = np.linalg.norm(ee_pos - hole_pos)
+
+        reward = -dist
+        inserted = dist < 0.01
 
         if dist > self.dlim:
             reward = -10
-        else:
-            reward = -dist
-
         if dist < 0.1:
             reward += 10
 
+        # Penalize collision but only if it occurs
+        contact_points = p.getContactPoints(bodyA=self.robot_id, linkIndexA=self.ee_link_index)
+        collision = len(contact_points) > 0
         if collision:
             reward -= 1
 
-        return reward
-
-    def _check_done(self, step_count, max_steps, collision):
-        ee_state = p.getLinkState(self.robot_id, self.ee_link_index)
-        ee_pos = np.array(ee_state[4])
-        hole_pos, _ = p.getBasePositionAndOrientation(self.hole_id)
-        hole_pos = np.array(hole_pos)
-        dist = np.linalg.norm(ee_pos - hole_pos)
-
-        inserted = dist < 0.01 
-
-        if inserted:
-            return True
-        if step_count >= max_steps:
-            return True
-        if collision:
-            return True
-
-        return False
+        return reward, inserted
 
     def render(self, mode='human'):
         pass
 
     def close(self):
         p.disconnect(self.physics_client)
+
 
 
 

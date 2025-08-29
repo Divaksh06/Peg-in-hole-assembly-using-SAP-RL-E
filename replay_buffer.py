@@ -19,9 +19,9 @@ class ReplayBuffer:
             img_seq = [episode[i]['image'] for i in range(start_idx,start_idx+self.window_size)]
             proprio_seq = [episode[i]['proprio'] for i in range(start_idx, start_idx + self.window_size)]
 
-            action = episode[start_idx + self.window_size - 1]
-            reward = episode[start_idx + self.window_size - 1]
-            done = episode[start_idx + self.window_size - 1]
+            action = episode[start_idx + self.window_size - 1]['action']
+            reward = episode[start_idx + self.window_size - 1]['reward']
+            done = episode[start_idx + self.window_size - 1]['done']
 
             next_img_seq = [episode[i]['image'] for i in range(start_idx,start_idx+self.window_size)]
             next_proprio_seq = [episode[i]['proprio'] for i in range(start_idx,start_idx+self.window_size)]
@@ -35,5 +35,5 @@ class ReplayBuffer:
 
         return img_seqs, proprio_seqs, actions, rewards, next_img_seqs, next_proprio_seqs, dones
         
-    def len(self):
+    def __len__(self):
         return self.buffer
