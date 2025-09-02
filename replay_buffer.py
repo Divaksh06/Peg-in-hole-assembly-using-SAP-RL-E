@@ -22,7 +22,7 @@ class ReplayBuffer:
             episode: List of transitions, where each transition is a dict with keys:
                     ['image', 'FT', 'Dz', 'action', 'reward', 'next_image', 'next_FT', 'next_Dz', 'done']
         """
-        if len(episode) >= self.window_size + 1:  # Need at least window_size + 1 transitions
+        if len(episode) >= self.window_size:  # Need at least window_size transitions
             self.buffer.append(episode)
     
     def sample(self, batch_size):
@@ -55,10 +55,10 @@ class ReplayBuffer:
         for episode in sampled_episodes:
             # Ensure we have enough transitions
             max_start_idx = len(episode) - self.window_size
-            if max_start_idx <= 0:
+            if max_start_idx < 0:
                 continue
                 
-            start_idx = random.randint(0, max_start_idx - 1)
+            start_idx = random.randint(0, max(0, max_start_idx))
             
             # Extract sequences of length window_size (6 as per PDF)
             img_seq = []
